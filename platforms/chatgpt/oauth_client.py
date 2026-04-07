@@ -2948,7 +2948,7 @@ class OAuthClient:
         self._log("步骤4: 检测到邮箱 OTP 验证")
         # 记录 OTP 发送时间基线——必须在 sentinel token 等耗时操作之前，
         # 否则邮件 created_at 会早于 otp_cutoff 导致验证码被误判为旧邮件。
-        _otp_sent_at_baseline = time.time()
+        _otp_sent_at_baseline = time.time() - 15
 
         def _resend_email_otp() -> bool:
             prefer_passwordless = bool(
