@@ -1482,7 +1482,7 @@ class DuckMailMailbox(BaseMailbox):
             "https://", ""
         )
         address = f"{username}@{domain}"
-        print(f"[DuckMail] 创建账号: {address} direct={self._direct}")
+        print(f"[DuckMail] 创建账号: {address} 密码：{password} direct={self._direct}")
         # 创建账号
         r = self._request(
             "POST", "/accounts", json={"address": address, "password": password}
