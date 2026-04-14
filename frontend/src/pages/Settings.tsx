@@ -71,6 +71,10 @@ const SELECT_FIELDS: Record<string, { label: string; value: string }[]> = {
     { label: 'AT（Access Token，推荐）', value: 'at' },
     { label: 'RT（Refresh Token）', value: 'rt' },
   ],
+  external_apps_update_mode: [
+    { label: 'latest semver tag（推荐）', value: 'tag' },
+    { label: '分支 HEAD', value: 'branch' },
+  ],
 }
 
 const TAB_ITEMS = [
@@ -217,6 +221,8 @@ const TAB_ITEMS = [
           { key: 'cfworker_admin_token', label: '管理员 Token', secret: true },
           { key: 'cfworker_custom_auth', label: '站点密码', secret: true },
           { key: 'cfworker_subdomain', label: '固定子域名', placeholder: 'mail / pool-a' },
+          { key: 'email_domain_rule_enabled', label: '启用域名规则', type: 'boolean' },
+          { key: 'email_domain_level_count', label: '域名级数（N 级）', placeholder: '例如 2 / 3 / 4' },
           { key: 'cfworker_random_subdomain', label: '随机子域名', type: 'boolean' },
           { key: 'cfworker_random_name_subdomain', label: '随机姓名子域名', type: 'boolean' },
           { key: 'cfworker_fingerprint', label: 'Fingerprint', placeholder: '6703363b...' },
@@ -566,6 +572,10 @@ function ConfigField({ field }: { field: FieldConfig }) {
   const helpText =
     field.key === 'default_executor'
       ? '仅对支持的平台生效；ChatGPT、Cursor、Grok、Kiro、Tavily、Trae 支持浏览器模式，OpenBlockLabs 仅支持纯协议。'
+      : field.key === 'email_domain_rule_enabled'
+      ? '仅 CF Worker 生效：开启后会校验域名级数，以及域名至少包含 2 个字母和 2 个数字。'
+      : field.key === 'email_domain_level_count'
+      ? '例如 2=example.com，3=a.example.com，4=a.b.example.com。'
       : undefined
 
   return (
@@ -793,6 +803,7 @@ function IntegrationsPanel() {
   const [items, setItems] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState('')
+  const [updateMode, setUpdateMode] = useState<'tag' | 'branch'>('tag')
   const saved = false
   const [resultModal, setResultModal] = useState({
     open: false,
@@ -813,8 +824,13 @@ function IntegrationsPanel() {
   const load = async () => {
     setLoading(true)
     try {
-      const d = await apiFetch('/integrations/services')
+      const [d, cfg] = await Promise.all([
+        apiFetch('/integrations/services'),
+        apiFetch('/config'),
+      ])
       setItems(d.items || [])
+      const mode = String(cfg?.external_apps_update_mode || 'tag').trim().toLowerCase()
+      setUpdateMode(mode === 'branch' ? 'branch' : 'tag')
     } finally {
       setLoading(false)
     }
@@ -854,6 +870,22 @@ function IntegrationsPanel() {
     } catch (e: any) {
       message.error(e?.message || `${label} 回填失败`)
       showResultModal(`${label} 回填结果`, e?.message || e || `${label} 回填失败`, false)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const updateInstallMode = async (nextMode: 'tag' | 'branch') => {
+    setBusy('update-mode')
+    try {
+      await apiFetch('/config', {
+        method: 'PUT',
+        body: JSON.stringify({ data: { external_apps_update_mode: nextMode } }),
+      })
+      setUpdateMode(nextMode)
+      message.success(nextMode === 'tag' ? '已切换到 tag 模式' : '已切换到分支模式')
+    } catch (e: any) {
+      message.error(e?.message || '切换失败')
     } finally {
       setBusy('')
     }
@@ -919,6 +951,24 @@ function IntegrationsPanel() {
         </pre>
       </Modal>
 
+      <Card title="安装/更新策略">
+        <Space wrap align="center">
+          <Select
+            style={{ width: 320 }}
+            value={updateMode}
+            options={SELECT_FIELDS.external_apps_update_mode}
+            onChange={(value) => setUpdateMode(value as 'tag' | 'branch')}
+          />
+          <Button
+            type="primary"
+            loading={busy === 'update-mode'}
+            onClick={() => updateInstallMode(updateMode)}
+          >
+            保存策略
+          </Button>
+        </Space>
+      </Card>
+
       <Card title="批量操作">
         <Space wrap>
           <Button loading={busy === 'start-all'} onClick={() => doAction('start-all', apiFetch('/integrations/services/start-all', { method: 'POST' }))}>
@@ -964,9 +1014,16 @@ function IntegrationsPanel() {
                   loading={busy === `install-${item.name}`}
                   onClick={() => doAction(`install-${item.name}`, apiFetch(`/integrations/services/${item.name}/install`, { method: 'POST' }))}
                 >
-                  安装
+                  安装最新版
                 </Button>
-              ) : null}
+              ) : (
+                <Button
+                  loading={busy === `install-${item.name}`}
+                  onClick={() => doAction(`install-${item.name}`, apiFetch(`/integrations/services/${item.name}/install`, { method: 'POST' }))}
+                >
+                  更新到最新版
+                </Button>
+              )}
               <Button
                 loading={busy === `start-${item.name}`}
                 disabled={!item.repo_exists}
@@ -979,6 +1036,21 @@ function IntegrationsPanel() {
                 onClick={() => doAction(`stop-${item.name}`, apiFetch(`/integrations/services/${item.name}/stop`, { method: 'POST' }))}
               >
                 停止
+              </Button>
+              <Button
+                danger
+                loading={busy === `uninstall-${item.name}`}
+                disabled={!item.repo_exists}
+                onClick={() => {
+                  const ok = window.confirm(`确认卸载 ${item.label}？\n会停止服务并删除本地插件目录。`)
+                  if (!ok) return
+                  doAction(
+                    `uninstall-${item.name}`,
+                    apiFetch(`/integrations/services/${item.name}/uninstall`, { method: 'POST' }),
+                  )
+                }}
+              >
+                卸载
               </Button>
               {item.name === 'grok2api' ? (
                 <Button
@@ -1022,10 +1094,20 @@ function ContributionPanel({
   const [statsResponse, setStatsResponse] = useState<Record<string, unknown> | null>(null)
   const [redeemResponse, setRedeemResponse] = useState<Record<string, unknown> | null>(null)
   const [statsError, setStatsError] = useState('')
+  const [bindingCustom, setBindingCustom] = useState(false)
+  const [customEmail, setCustomEmail] = useState('')
+  const [customStatsResponse, setCustomStatsResponse] = useState<Record<string, unknown> | null>(null)
+  const [customBalanceResponse, setCustomBalanceResponse] = useState<Record<string, unknown> | null>(null)
+  const [loadingCustomStats, setLoadingCustomStats] = useState(false)
 
   const contributionEnabled = Form.useWatch('contribution_enabled', form)
+  const contributionMode = String(Form.useWatch('contribution_mode', form) || 'codex').trim()
   const contributionServerUrl = String(Form.useWatch('contribution_server_url', form) || '').trim()
   const contributionKey = String(Form.useWatch('contribution_key', form) || '').trim()
+  const customContributionUrl = String(Form.useWatch('custom_contribution_url', form) || '').trim()
+  const customContributionToken = String(Form.useWatch('custom_contribution_token', form) || '').trim()
+
+  const isCustomMode = contributionMode === 'custom'
 
   const rawData = asRecord(statsResponse?.['data'])
   const serverInfo = pickRecord(rawData, ['server_info', 'server', 'server_stats', 'stats']) || rawData
@@ -1169,6 +1251,68 @@ function ContributionPanel({
     }
   }
 
+  const doBindCustom = async () => {
+    if (!customEmail.trim()) {
+      message.error('请输入邮箱')
+      return
+    }
+    if (!customContributionUrl) {
+      message.error('请先填写自定义服务器地址')
+      return
+    }
+    setBindingCustom(true)
+    try {
+      const data = await apiFetch('/contribution/custom/bind', {
+        method: 'POST',
+        body: JSON.stringify({
+          email: customEmail.trim(),
+          server_url: customContributionUrl,
+        }),
+      })
+      const token = pickString(asRecord(data), ['token'])
+      if (token) {
+        form.setFieldValue('custom_contribution_token', token)
+        message.success('绑定成功！token 已自动填充，请点击保存配置')
+        setCustomEmail('')
+      } else {
+        message.success('绑定成功')
+      }
+    } catch (e: any) {
+      message.error(String(e?.message || '绑定失败'))
+    } finally {
+      setBindingCustom(false)
+    }
+  }
+
+  const fetchCustomStats = async () => {
+    if (!contributionEnabled) {
+      message.warning('请先开启贡献功能')
+      return
+    }
+    if (!customContributionUrl) {
+      message.error('请先填写自定义服务器地址')
+      return
+    }
+    if (!customContributionToken) {
+      message.error('请先绑定邮箱获取 token')
+      return
+    }
+    setLoadingCustomStats(true)
+    try {
+      const [status, balance] = await Promise.all([
+        apiFetch(`/contribution/custom/status?server_url=${encodeURIComponent(customContributionUrl)}&token=${encodeURIComponent(customContributionToken)}`),
+        apiFetch(`/contribution/custom/balance?server_url=${encodeURIComponent(customContributionUrl)}&token=${encodeURIComponent(customContributionToken)}`),
+      ])
+      setCustomStatsResponse(asRecord(status))
+      setCustomBalanceResponse(asRecord(balance))
+      message.success('信息已刷新')
+    } catch (e: any) {
+      message.error(String(e?.message || '获取信息失败'))
+    } finally {
+      setLoadingCustomStats(false)
+    }
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <Card title="配置">
@@ -1189,104 +1333,178 @@ function ContributionPanel({
         <Form.Item name="contribution_enabled" label="是否开启" valuePropName="checked">
           <Switch checkedChildren="开启" unCheckedChildren="关闭" />
         </Form.Item>
-        <Form.Item
-          name="contribution_server_url"
-          label="服务器地址"
-          rules={[{ required: true, message: '请输入服务器地址' }]}
-        >
-          <Input placeholder="http://new.xem8k5.top:7317/" />
+        <Form.Item name="contribution_mode" label="贡献模式">
+          <Select>
+            <Select.Option value="codex">Codex2API（xem中转站）</Select.Option>
+            <Select.Option value="custom">自定义贡献系统</Select.Option>
+          </Select>
         </Form.Item>
-        <Form.Item name="contribution_key" label="API Key">
-          <Input
-            placeholder="留空可点击右侧按钮自动创建"
-            addonAfter={(
-              <Button
-                type="link"
-                size="small"
-                loading={creatingKey}
-                onClick={() => { void doGenerateKey() }}
-                style={{ paddingInline: 0 }}
-              >
-                没有key?请求新建
-              </Button>
-            )}
-          />
-        </Form.Item>
+
+        {!isCustomMode ? (
+          <>
+            <Form.Item
+              name="contribution_server_url"
+              label="服务器地址"
+              rules={[{ required: true, message: '请输入服务器地址' }]}
+            >
+              <Input placeholder="http://new.xem8k5.top:7317/" />
+            </Form.Item>
+            <Form.Item name="contribution_key" label="API Key">
+              <Input
+                placeholder="留空可点击右侧按钮自动创建"
+                addonAfter={(
+                  <Button
+                    type="link"
+                    size="small"
+                    loading={creatingKey}
+                    onClick={() => { void doGenerateKey() }}
+                    style={{ paddingInline: 0 }}
+                  >
+                    没有key?请求新建
+                  </Button>
+                )}
+              />
+            </Form.Item>
+          </>
+        ) : (
+          <>
+            <Form.Item
+              name="custom_contribution_url"
+              label="自定义服务器地址"
+              rules={[{ required: true, message: '请输入服务器地址' }]}
+            >
+              <Input placeholder="http://127.0.0.1:5000" />
+            </Form.Item>
+            <Form.Item label="绑定邮箱">
+              <Space.Compact style={{ width: '100%' }}>
+                <Input
+                  placeholder="输入邮箱以绑定账号"
+                  value={customEmail}
+                  onChange={(e) => setCustomEmail(e.target.value)}
+                  onPressEnter={() => { void doBindCustom() }}
+                />
+                <Button type="primary" loading={bindingCustom} onClick={() => { void doBindCustom() }}>
+                  绑定
+                </Button>
+              </Space.Compact>
+            </Form.Item>
+            <Form.Item name="custom_contribution_token" label="Token">
+              <Input.TextArea placeholder="绑定邮箱后自动填充" rows={3} />
+            </Form.Item>
+          </>
+        )}
+
         <Button type="primary" icon={<SaveOutlined />} onClick={onSave} loading={saving} block>
           {saved ? '已保存 ✓' : '保存配置'}
         </Button>
       </Card>
 
-      <Card
-        title="信息"
-        extra={(
-          <Button loading={loadingStats} onClick={() => { void fetchStats() }}>
-            刷新信息
-          </Button>
-        )}
-      >
-        {!contributionEnabled ? (
-          <Alert type="info" showIcon message="贡献功能已关闭，开启后可获取服务器与 key 信息。" />
-        ) : (
-          <Space direction="vertical" style={{ width: '100%' }} size={12}>
-            {statsError ? <Alert type="error" showIcon message={statsError} /> : null}
-            <div>
-              <Typography.Text strong>服务器信息</Typography.Text>
-              <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8 }}>
-                <Tag color="blue">账号数: {formatDisplayNumber(serverQuotaAccountCount)}</Tag>
-                <Tag color="geekblue">总额度: {formatDisplayNumber(serverQuotaTotal)}</Tag>
-                <Tag color="volcano">已用额度: {formatDisplayNumber(serverQuotaUsed)}</Tag>
-                <Tag color="green">剩余额度: {formatDisplayNumber(serverQuotaRemaining)}</Tag>
-                <Tag color="orange">已用占比: {formatDisplayPercent(serverQuotaUsedPercent)}</Tag>
-                <Tag color="cyan">剩余占比: {formatDisplayPercent(serverQuotaRemainingPercent)}</Tag>
-                <Tag color="purple">折算账号数: {formatDisplayNumber(serverQuotaRemainingAccounts, 2)}</Tag>
-              </div>
-            </div>
-            <div>
-              <Typography.Text strong>API Key</Typography.Text>
-              <Space style={{ marginLeft: 8 }}>
-                <Typography.Text copyable={keyFromStats ? { text: keyFromStats } : undefined}>
-                  {keyFromStats || '-'}
-                </Typography.Text>
+      {!isCustomMode ? (
+        <>
+          <Card
+            title="信息"
+            extra={(
+              <Button loading={loadingStats} onClick={() => { void fetchStats() }}>
+                刷新信息
+              </Button>
+            )}
+          >
+            {!contributionEnabled ? (
+              <Alert type="info" showIcon message="贡献功能已关闭，开启后可获取服务器与 key 信息。" />
+            ) : (
+              <Space direction="vertical" style={{ width: '100%' }} size={12}>
+                {statsError ? <Alert type="error" showIcon message={statsError} /> : null}
+                <div>
+                  <Typography.Text strong>服务器信息</Typography.Text>
+                  <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8 }}>
+                    <Tag color="blue">账号数: {formatDisplayNumber(serverQuotaAccountCount)}</Tag>
+                    <Tag color="geekblue">总额度: {formatDisplayNumber(serverQuotaTotal)}</Tag>
+                    <Tag color="volcano">已用额度: {formatDisplayNumber(serverQuotaUsed)}</Tag>
+                    <Tag color="green">剩余额度: {formatDisplayNumber(serverQuotaRemaining)}</Tag>
+                    <Tag color="orange">已用占比: {formatDisplayPercent(serverQuotaUsedPercent)}</Tag>
+                    <Tag color="cyan">剩余占比: {formatDisplayPercent(serverQuotaRemainingPercent)}</Tag>
+                    <Tag color="purple">折算账号数: {formatDisplayNumber(serverQuotaRemainingAccounts, 2)}</Tag>
+                  </div>
+                </div>
+                <div>
+                  <Typography.Text strong>API Key</Typography.Text>
+                  <Space style={{ marginLeft: 8 }}>
+                    <Typography.Text copyable={keyFromStats ? { text: keyFromStats } : undefined}>
+                      {keyFromStats || '-'}
+                    </Typography.Text>
+                  </Space>
+                </div>
+                <div>
+                  <Typography.Text strong>key 信息</Typography.Text>
+                  <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8 }}>
+                    <Tag color="blue">余额: {keyBalance ?? '-'}</Tag>
+                    <Tag color="geekblue">来源: {keySource}</Tag>
+                    <Tag color="cyan">绑定账号数: {boundAccounts ?? '-'}</Tag>
+                    <Tag color="purple">结算金额: {settlementAmount ?? '-'}</Tag>
+                  </div>
+                </div>
               </Space>
-            </div>
-            <div>
-              <Typography.Text strong>key 信息</Typography.Text>
-              <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8 }}>
-                <Tag color="blue">余额: {keyBalance ?? '-'}</Tag>
-                <Tag color="geekblue">来源: {keySource}</Tag>
-                <Tag color="cyan">绑定账号数: {boundAccounts ?? '-'}</Tag>
-                <Tag color="purple">结算金额: {settlementAmount ?? '-'}</Tag>
-              </div>
-            </div>
-          </Space>
-        )}
-      </Card>
+            )}
+          </Card>
 
-      <Card title="提现">
-        <Space direction="vertical" style={{ width: '100%' }}>
-          <Typography.Text>key 当前额度：{keyBalance ?? '-'}</Typography.Text>
-          <Form.Item label="提现金额" style={{ marginBottom: 0 }}>
-            <Select
-              value={redeemAmount}
-              onChange={setRedeemAmount}
-              style={{ width: 240 }}
-              options={CONTRIBUTION_REDEEM_OPTIONS.map((amount) => ({ label: String(amount), value: amount }))}
-            />
-          </Form.Item>
-          <Button type="primary" danger onClick={() => { void doRedeem() }} loading={redeeming}>
-            提现确认
-          </Button>
-          {redeemResponse ? (
-            <Alert
-              type={redeemResponse.ok === false ? 'error' : 'success'}
-              showIcon
-              message={redeemResponse.ok === false ? `提现失败：${String(redeemResponse.error || '-')}` : redeemSuccessText}
-              description={<pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{formatResultText(redeemResponse)}</pre>}
-            />
-          ) : null}
-        </Space>
-      </Card>
+          <Card title="提现">
+            <Space direction="vertical" style={{ width: '100%' }}>
+              <Typography.Text>key 当前额度：{keyBalance ?? '-'}</Typography.Text>
+              <Form.Item label="提现金额" style={{ marginBottom: 0 }}>
+                <Select
+                  value={redeemAmount}
+                  onChange={setRedeemAmount}
+                  style={{ width: 240 }}
+                  options={CONTRIBUTION_REDEEM_OPTIONS.map((amount) => ({ label: String(amount), value: amount }))}
+                />
+              </Form.Item>
+              <Button type="primary" danger onClick={() => { void doRedeem() }} loading={redeeming}>
+                提现确认
+              </Button>
+              {redeemResponse ? (
+                <Alert
+                  type={redeemResponse.ok === false ? 'error' : 'success'}
+                  showIcon
+                  message={redeemResponse.ok === false ? `提现失败：${String(redeemResponse.error || '-')}` : redeemSuccessText}
+                  description={<pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{formatResultText(redeemResponse)}</pre>}
+                />
+              ) : null}
+            </Space>
+          </Card>
+        </>
+      ) : (
+        <Card
+          title="信息"
+          extra={(
+            <Button loading={loadingCustomStats} onClick={() => { void fetchCustomStats() }}>
+              刷新信息
+            </Button>
+          )}
+        >
+          {!contributionEnabled ? (
+            <Alert type="info" showIcon message="贡献功能已关闭，开启后可获取信息。" />
+          ) : !customContributionToken ? (
+            <Alert type="warning" showIcon message="请先绑定邮箱获取 token" />
+          ) : (
+            <Space direction="vertical" style={{ width: '100%' }} size={12}>
+              <div>
+                <Typography.Text strong>余额信息</Typography.Text>
+                <div style={{ marginTop: 8 }}>
+                  <Tag color="blue">余额: {pickNumber(asRecord(customBalanceResponse), ['balance']) ?? '-'}</Tag>
+                </div>
+              </div>
+              <div>
+                <Typography.Text strong>贡献记录</Typography.Text>
+                <div style={{ marginTop: 8 }}>
+                  <Tag color="green">成功: {pickNumber(asRecord(customStatsResponse), ['success_count']) ?? '-'}</Tag>
+                  <Tag color="orange">待处理: {pickNumber(asRecord(customStatsResponse), ['pending_count']) ?? '-'}</Tag>
+                  <Tag color="red">失败: {pickNumber(asRecord(customStatsResponse), ['failed_count']) ?? '-'}</Tag>
+                </div>
+              </div>
+            </Space>
+          )}
+        </Card>
+      )}
     </div>
   )
 }
@@ -1581,6 +1799,12 @@ export default function Settings() {
       if (!data.contribution_server_url) {
         data.contribution_server_url = 'http://new.xem8k5.top:7317/'
       }
+      if (!data.contribution_mode) {
+        data.contribution_mode = 'codex'
+      }
+      if (!data.custom_contribution_url) {
+        data.custom_contribution_url = 'http://127.0.0.1:5000'
+      }
       if (!data.cloudmail_timeout) {
         data.cloudmail_timeout = 30
       }
@@ -1597,6 +1821,10 @@ export default function Settings() {
       data.cfworker_random_subdomain = parseBooleanConfigValue(data.cfworker_random_subdomain)
       data.cfworker_random_name_subdomain = parseBooleanConfigValue(data.cfworker_random_name_subdomain)
       data.contribution_enabled = parseBooleanConfigValue(data.contribution_enabled)
+      data.email_domain_rule_enabled = parseBooleanConfigValue(data.email_domain_rule_enabled)
+      if (!String(data.email_domain_level_count ?? '').trim()) {
+        data.email_domain_level_count = 2
+      }
       data.mail_import_source = configMailProvider === 'applemail' ? 'applemail' : 'microsoft'
       data.mail_provider = isMailImportProvider ? 'mail_import' : configMailProvider
       form.setFieldsValue(data)
@@ -1661,6 +1889,19 @@ export default function Settings() {
       values.cfworker_random_subdomain = parseBooleanConfigValue(values.cfworker_random_subdomain)
       values.cfworker_random_name_subdomain = parseBooleanConfigValue(values.cfworker_random_name_subdomain)
       values.contribution_enabled = parseBooleanConfigValue(values.contribution_enabled)
+      values.email_domain_rule_enabled = parseBooleanConfigValue(values.email_domain_rule_enabled)
+      const rawDomainLevelCount = Number.parseInt(String(values.email_domain_level_count ?? '').trim(), 10)
+      if (values.mail_provider === 'cfworker' && values.email_domain_rule_enabled) {
+        if (!Number.isInteger(rawDomainLevelCount) || rawDomainLevelCount < 2) {
+          setActiveTab('mailbox')
+          message.error('域名级数必须是大于等于 2 的整数')
+          return
+        }
+      }
+      values.email_domain_level_count =
+        Number.isInteger(rawDomainLevelCount) && rawDomainLevelCount >= 2
+          ? String(rawDomainLevelCount)
+          : '2'
 
       await apiFetch('/config', { method: 'PUT', body: JSON.stringify({ data: values }) })
       form.setFieldsValue({
@@ -1674,6 +1915,11 @@ export default function Settings() {
         cfworker_random_subdomain: values.cfworker_random_subdomain,
         cfworker_random_name_subdomain: values.cfworker_random_name_subdomain,
         contribution_enabled: values.contribution_enabled,
+        contribution_mode: values.contribution_mode,
+        custom_contribution_url: values.custom_contribution_url,
+        custom_contribution_token: values.custom_contribution_token,
+        email_domain_rule_enabled: values.email_domain_rule_enabled,
+        email_domain_level_count: values.email_domain_level_count,
       })
       message.success('保存成功')
       setSaved(true)
